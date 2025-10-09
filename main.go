@@ -134,14 +134,12 @@ func main() {
 	defer keyFile.Close()
 
 	for _, pair := range newCerts {
-		// 依次写入所有证书 (形成 bundle)
 		_, err = crtFile.Write(pair.newCertPem)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	// 私钥只写最上层证书的
 	_, err = keyFile.Write(newCerts[0].privPem)
 	if err != nil {
 		log.Fatal(err)
