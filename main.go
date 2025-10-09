@@ -9,12 +9,10 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
-	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
-	"time"
 )
 
 type certPair struct {
@@ -39,7 +37,6 @@ func getCertsFromNetwork(addr string) ([]*x509.Certificate, error) {
 
 func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
 	certs := make([]*certPair, len(originCerts))
-	// the origin order: website cert, intermediate ca, root ca
 	for idx, cert := range originCerts {
 		log.Printf("got cert: %s", cert.Subject.CommonName)
 		certs[idx] = &certPair{originCert: cert}
@@ -73,10 +70,7 @@ func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
 			return nil, fmt.Errorf("unknown key type: %T", pair.originCert.PublicKey)
 		}
 
-		// remove the old public key (from the origin website cert)
 		pair.originCert.PublicKey = nil
-		// wo do not generate the root ca, the intermediate ca will be self-signed,
-		// so the origin signature algorithm may be wrong
 		pair.originCert.SignatureAlgorithm = x509.UnknownSignatureAlgorithm
 		pair.newCert = pair.originCert
 		var parent *certPair
@@ -101,14 +95,22 @@ func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
 	return certs, nil
 }
 
-var fileNameRegex = regexp.MustCompile(`[^a-zA-Z0-9_\-.]`)
-
 func main() {
 	if len(os.Args) != 2 {
-		name := filepath.Base(os.Args[0])
-		log.Fatalf("usage: %s $addr, for example: %s github.com:443", name, name)
+		log.Fatalf("usage: %s https://example.com/", os.Args[0])
 	}
-	certs, err := getCertsFromNetwork(os.Args[1])
+
+	// 解析 URL
+	u, err := url.Parse(os.Args[1])
+	if err != nil {
+		log.Fatalf("invalid URL: %v", err)
+	}
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		host += ":443"
+	}
+
+	certs, err := getCertsFromNetwork(host)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -118,45 +120,32 @@ func main() {
 	}
 	slices.Reverse(newCerts)
 
-	dir := filepath.Join("certs", time.Now().Local().Format("2006_01_02_15_04_05"))
-	err = os.MkdirAll(dir, 0o744)
+	// 写入 server.crt (bundle)
+	crtFile, err := os.OpenFile("server.crt", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer crtFile.Close()
 
-	bundleCert, err := os.OpenFile(filepath.Join(dir, "bundle.crt"), os.O_WRONLY|os.O_CREATE, 0o744)
+	keyFile, err := os.OpenFile("server.key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bundleCert.Close()
-	bundleKey, err := os.OpenFile(filepath.Join(dir, "bundle.key"), os.O_WRONLY|os.O_CREATE, 0o744)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer bundleKey.Close()
+	defer keyFile.Close()
 
 	for _, pair := range newCerts {
-		log.Printf("going to write new cert and key: %s", pair.newCert.Subject.CommonName)
-		// 担心星号在 Windows 上是不合法的文件名（当然我也没测试），但是被替换为下换线又很奇怪，所以替换成 __wildcard__
-		pathBase := strings.ReplaceAll(pair.newCert.Subject.CommonName, "*", "__wildcard__")
-		pathBase = fileNameRegex.ReplaceAllString(pathBase, "_")
-		err = os.WriteFile(filepath.Join(dir, pathBase+".crt"), pair.newCertPem, 0o744)
-		if err != nil {
-			log.Fatal(err)
-		}
-		_, err = bundleCert.Write(pair.newCertPem)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		err = os.WriteFile(filepath.Join(dir, pathBase+".key"), pair.privPem, 0o744)
-		if err != nil {
-			log.Fatal(err)
-		}
-		_, err = bundleKey.Write(pair.privPem)
+		// 依次写入所有证书 (形成 bundle)
+		_, err = crtFile.Write(pair.newCertPem)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
-	log.Printf("certs save to %s", dir)
+
+	// 私钥只写最上层证书的
+	_, err = keyFile.Write(newCerts[0].privPem)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Generated server.crt (bundle) and server.key in current directory.")
 }
