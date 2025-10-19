@@ -13,6 +13,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"net"
 )
 
 type certPair struct {
@@ -35,7 +36,7 @@ func getCertsFromNetwork(addr string) ([]*x509.Certificate, error) {
 	return conn.ConnectionState().PeerCertificates, nil
 }
 
-func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
+func makeCerts(originCerts []*x509.Certificate, ipSAN string) ([]*certPair, error) {
 	certs := make([]*certPair, len(originCerts))
 	for idx, cert := range originCerts {
 		log.Printf("got cert: %s", cert.Subject.CommonName)
@@ -72,7 +73,17 @@ func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
 
 		pair.originCert.PublicKey = nil
 		pair.originCert.SignatureAlgorithm = x509.UnknownSignatureAlgorithm
+		
+		if ipSAN != "" {
+			ip := net.ParseIP(ipSAN)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid IP address: %s", ipSAN)
+			}
+			pair.originCert.IPAddresses = append(pair.originCert.IPAddresses, ip)
+		}
+
 		pair.newCert = pair.originCert
+
 		var parent *certPair
 
 		if idx > 0 {
@@ -96,8 +107,13 @@ func makeCerts(originCerts []*x509.Certificate) ([]*certPair, error) {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		log.Fatalf("usage: %s https://example.com/", os.Args[0])
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		log.Fatalf("usage: %s https://example.com/ [optional IP SAN]", os.Args[0])
+	}
+
+	ipSAN := ""
+	if len(os.Args) == 3 {
+		ipSAN = os.Args[2]
 	}
 
 	// 解析 URL
@@ -114,7 +130,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	newCerts, err := makeCerts(certs)
+	newCerts, err := makeCerts(certs, ipSAN)
 	if err != nil {
 		log.Fatal(err)
 	}
